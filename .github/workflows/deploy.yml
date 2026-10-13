@@ -44,7 +44,10 @@ jobs:
       - name: Start API Tunnel
         id: api_tunnel
         run: |
-          ./cloudflared tunnel --url http://localhost:9000 > /tmp/api_cf.log 2>&1 &
+          # --protocol http2 avoids QUIC/UDP, which GitHub-hosted runners handle
+          # unreliably and which is the most common cause of a quick tunnel
+          # silently dropping and reconnecting (= a dead URL baked into the web build)
+          ./cloudflared tunnel --protocol http2 --url http://localhost:9000 > /tmp/api_cf.log 2>&1 &
           for i in $(seq 1 60); do
             if grep -qE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/api_cf.log; then break; fi
             sleep 2
@@ -106,7 +109,7 @@ jobs:
       - name: Start Web Tunnel
         id: web_tunnel
         run: |
-          ./cloudflared tunnel --url http://localhost:3000 > /tmp/web_cf.log 2>&1 &
+          ./cloudflared tunnel --protocol http2 --url http://localhost:3000 > /tmp/web_cf.log 2>&1 &
           for i in $(seq 1 60); do
             if grep -qE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/web_cf.log; then break; fi
             sleep 2
@@ -116,10 +119,39 @@ jobs:
           if [ -z "$WEB_URL" ]; then echo "Web Tunnel failed"; exit 1; fi
           echo "WEB_URL=$WEB_URL" >> "$GITHUB_OUTPUT"
 
+      - name: Verify CORS preflight works like a real browser would see it
+        run: |
+          # Simulate the OPTIONS preflight a browser sends before the real POST /,
+          # using the public web tunnel origin exactly as the browser would.
+          echo "--- preflight response headers ---"
+          curl -sS -i -X OPTIONS "${{ steps.api_tunnel.outputs.API_URL }}/" \
+            -H "Origin: ${{ steps.web_tunnel.outputs.WEB_URL }}" \
+            -H "Access-Control-Request-Method: POST" \
+            -H "Access-Control-Request-Headers: content-type,accept" | head -n 20
+          echo "-----------------------------------"
+          echo "If you don't see 'access-control-allow-origin' in the headers above,"
+          echo "that's why the browser's POST never goes out even though curl GET works."
+
       - name: Print Final Links
         run: |
           echo "API TUNNEL LINK: ${{ steps.api_tunnel.outputs.API_URL }}" >> "$GITHUB_STEP_SUMMARY"
           echo "WEB TUNNEL LINK: ${{ steps.web_tunnel.outputs.WEB_URL }}" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Keep Alive for 6 Hours
-        run: sleep 21600
+      - name: Keep Alive for 6 Hours (watch for tunnel drops)
+        run: |
+          ORIGINAL_API="${{ steps.api_tunnel.outputs.API_URL }}"
+          ORIGINAL_WEB="${{ steps.web_tunnel.outputs.WEB_URL }}"
+          END=$((SECONDS + 21600))
+          while [ $SECONDS -lt $END ]; do
+            CURRENT_API=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/api_cf.log | tail -n 1)
+            CURRENT_WEB=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/web_cf.log | tail -n 1)
+            if [ "$CURRENT_API" != "$ORIGINAL_API" ]; then
+              echo "::warning::API quick tunnel reconnected with a NEW url ($CURRENT_API)."
+              echo "The web app was built pointing at $ORIGINAL_API, which is now dead."
+              echo "This is the quick-tunnel instability issue - consider a named Cloudflare Tunnel instead."
+            fi
+            if [ "$CURRENT_WEB" != "$ORIGINAL_WEB" ]; then
+              echo "::warning::Web quick tunnel reconnected with a NEW url ($CURRENT_WEB)."
+            fi
+            sleep 60
+          done
