@@ -1,4 +1,4 @@
-name: Run Cobalt API + Web with TryCloudflare
+name: Run Cobalt API + Custom Web Panel with TryCloudflare
 
 on:
   workflow_dispatch:
@@ -9,9 +9,6 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
       - name: Install cloudflared
         run: |
           curl -L --output cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
@@ -45,8 +42,7 @@ jobs:
         id: api_tunnel
         run: |
           # --protocol http2 avoids QUIC/UDP, which GitHub-hosted runners handle
-          # unreliably and which is the most common cause of a quick tunnel
-          # silently dropping and reconnecting (= a dead URL baked into the web build)
+          # unreliably and which is a common cause of a quick tunnel dropping/reconnecting
           ./cloudflared tunnel --protocol http2 --url http://localhost:9000 > /tmp/api_cf.log 2>&1 &
           for i in $(seq 1 60); do
             if grep -qE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/api_cf.log; then break; fi
@@ -68,7 +64,6 @@ jobs:
             -e CORS_WILDCARD="1" \
             ghcr.io/imputnet/cobalt:11
 
-          # make sure it's actually back up before anything tries to use it
           for i in $(seq 1 30); do
             if curl -sf http://localhost:9000/ > /dev/null; then
               echo "API is back up"; exit 0
@@ -77,73 +72,366 @@ jobs:
           done
           echo "Cobalt API never came back up after restart"; docker logs cobalt-api; exit 1
 
-      - name: Build Cobalt Web UI from Fork
+      - name: Create custom single-file web panel
+        run: |
+          mkdir -p web
+          cat > web/index.html << 'HTML_EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>cobalt (self-hosted)</title>
+          <style>
+            :root {
+              --bg: #f4f4f5;
+              --card: #ffffff;
+              --text: #18181b;
+              --muted: #71717a;
+              --border: #e4e4e7;
+              --accent: #6366f1;
+              --accent-text: #ffffff;
+              --error-bg: #fef2f2;
+              --error-text: #b91c1c;
+              --ok-bg: #f0fdf4;
+              --ok-text: #15803d;
+              color-scheme: light dark;
+            }
+            @media (prefers-color-scheme: dark) {
+              :root {
+                --bg: #0a0a0b;
+                --card: #18181b;
+                --text: #f4f4f5;
+                --muted: #a1a1aa;
+                --border: #27272a;
+                --accent: #818cf8;
+                --accent-text: #0a0a0b;
+                --error-bg: #2a1212;
+                --error-text: #fca5a5;
+                --ok-bg: #0f2418;
+                --ok-text: #86efac;
+              }
+            }
+            * { box-sizing: border-box; }
+            html, body {
+              margin: 0; padding: 0;
+              background: var(--bg);
+              color: var(--text);
+              font-family: ui-monospace, "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+              min-height: 100%;
+            }
+            body {
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              padding: 24px;
+              padding-top: calc(24px + env(safe-area-inset-top, 0px));
+              padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+            }
+            .card {
+              width: 100%;
+              max-width: 520px;
+              background: var(--card);
+              border: 1px solid var(--border);
+              border-radius: 16px;
+              padding: 28px;
+            }
+            h1 {
+              font-size: 18px;
+              margin: 0 0 4px;
+              display: flex;
+              align-items: center;
+              gap: 8px;
+            }
+            .sub {
+              color: var(--muted);
+              font-size: 13px;
+              margin: 0 0 20px;
+            }
+            .row {
+              display: flex;
+              gap: 8px;
+            }
+            input[type="text"], input[type="url"] {
+              flex: 1;
+              min-width: 0;
+              padding: 12px 14px;
+              border-radius: 10px;
+              border: 1px solid var(--border);
+              background: var(--bg);
+              color: var(--text);
+              font-family: inherit;
+              font-size: 14px;
+            }
+            input[type="text"]:focus, input[type="url"]:focus {
+              outline: 2px solid var(--accent);
+              outline-offset: 1px;
+            }
+            button {
+              padding: 12px 18px;
+              border-radius: 10px;
+              border: none;
+              background: var(--accent);
+              color: var(--accent-text);
+              font-family: inherit;
+              font-size: 14px;
+              font-weight: 600;
+              cursor: pointer;
+              white-space: nowrap;
+            }
+            button:disabled { opacity: 0.6; cursor: wait; }
+            button.secondary {
+              background: transparent;
+              color: var(--muted);
+              border: 1px solid var(--border);
+              font-weight: 500;
+            }
+            .settings {
+              margin-top: 16px;
+              border-top: 1px solid var(--border);
+              padding-top: 16px;
+              display: none;
+            }
+            .settings.open { display: block; }
+            .settings label {
+              display: block;
+              font-size: 12px;
+              color: var(--muted);
+              margin-bottom: 6px;
+            }
+            .toggle-settings {
+              background: none;
+              border: none;
+              color: var(--muted);
+              font-size: 12px;
+              text-decoration: underline;
+              cursor: pointer;
+              padding: 0;
+              margin-top: 14px;
+            }
+            .result {
+              margin-top: 18px;
+              padding: 14px;
+              border-radius: 10px;
+              font-size: 13px;
+              word-break: break-word;
+              display: none;
+            }
+            .result.show { display: block; }
+            .result.error { background: var(--error-bg); color: var(--error-text); }
+            .result.ok { background: var(--ok-bg); color: var(--ok-text); }
+            .result a { color: inherit; font-weight: 700; }
+            .picker-item {
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+              gap: 8px;
+              padding: 6px 0;
+              border-bottom: 1px solid rgba(127,127,127,0.2);
+            }
+            .picker-item:last-child { border-bottom: none; }
+            .spinner {
+              width: 14px; height: 14px;
+              border: 2px solid rgba(127,127,127,0.3);
+              border-top-color: currentColor;
+              border-radius: 50%;
+              display: inline-block;
+              animation: spin 0.7s linear infinite;
+              vertical-align: middle;
+              margin-right: 6px;
+            }
+            @keyframes spin { to { transform: rotate(360deg); } }
+          </style>
+          </head>
+          <body>
+            <div class="card">
+              <h1>cobalt <span style="color:var(--muted); font-weight:400;">· self-hosted</span></h1>
+              <p class="sub">paste a link from youtube, tiktok, instagram, etc.</p>
+          
+              <div class="row">
+                <input type="url" id="link" placeholder="https://..." autocomplete="off" />
+                <button id="go">download</button>
+              </div>
+          
+              <button class="toggle-settings" id="toggleSettings">settings</button>
+          
+              <div class="settings" id="settings">
+                <label for="apiUrl">API endpoint (saved locally in this browser)</label>
+                <div class="row">
+                  <input type="text" id="apiUrl" placeholder="https://your-api.trycloudflare.com" />
+                  <button class="secondary" id="saveApi">save</button>
+                </div>
+              </div>
+          
+              <div class="result" id="result"></div>
+            </div>
+          
+          <script>
+          (function () {
+            "use strict";
+          
+            // Injected at deploy time by the workflow; can always be overridden below
+            // at runtime without rebuilding anything, which matters because free
+            // Cloudflare quick tunnels can rotate to a new hostname mid-session.
+            var DEFAULT_API_URL = "__API_URL_PLACEHOLDER__";
+            var STORAGE_KEY = "cobalt_api_url";
+          
+            var $ = function (id) { return document.getElementById(id); };
+            var linkInput = $("link");
+            var goBtn = $("go");
+            var resultEl = $("result");
+            var settingsEl = $("settings");
+            var apiUrlInput = $("apiUrl");
+          
+            function getApiUrl() {
+              var stored = "";
+              try { stored = localStorage.getItem(STORAGE_KEY) || ""; } catch (e) {}
+              return (stored || DEFAULT_API_URL).replace(/\/+$/, "");
+            }
+          
+            function setApiUrl(url) {
+              try { localStorage.setItem(STORAGE_KEY, url); } catch (e) {}
+            }
+          
+            apiUrlInput.value = getApiUrl();
+          
+            $("toggleSettings").addEventListener("click", function () {
+              settingsEl.classList.toggle("open");
+            });
+          
+            $("saveApi").addEventListener("click", function () {
+              var v = apiUrlInput.value.trim();
+              if (!v) return;
+              setApiUrl(v);
+              showResult("ok", "API endpoint saved: " + v);
+            });
+          
+            function showResult(kind, html) {
+              resultEl.className = "result show " + kind;
+              resultEl.innerHTML = html;
+            }
+          
+            function hideResult() {
+              resultEl.className = "result";
+              resultEl.innerHTML = "";
+            }
+          
+            function escapeHtml(s) {
+              return String(s).replace(/[&<>"']/g, function (c) {
+                return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+              });
+            }
+          
+            async function handleDownload() {
+              var url = linkInput.value.trim();
+              if (!url) {
+                showResult("error", "paste a link first.");
+                return;
+              }
+          
+              var apiUrl = getApiUrl();
+              if (!apiUrl) {
+                showResult("error", "no API endpoint configured - open settings and paste one in.");
+                return;
+              }
+          
+              goBtn.disabled = true;
+              showResult("ok", '<span class="spinner"></span>processing...');
+          
+              try {
+                var res = await fetch(apiUrl + "/", {
+                  method: "POST",
+                  mode: "cors",
+                  headers: {
+                    "Accept": "application/json",
+                    "Content-Type": "application/json"
+                  },
+                  body: JSON.stringify({ url: url })
+                });
+          
+                var data;
+                try {
+                  data = await res.json();
+                } catch (parseErr) {
+                  showResult(
+                    "error",
+                    "the server did not return valid JSON (got a non-API response, HTTP " + res.status + "). " +
+                    "this usually means the request never reached the cobalt API - check the API endpoint in settings."
+                  );
+                  return;
+                }
+          
+                if (!res.ok || data.status === "error") {
+                  var code = (data && data.error && data.error.code) || ("HTTP " + res.status);
+                  showResult("error", "error: " + escapeHtml(code));
+                  return;
+                }
+          
+                if (data.status === "redirect" || data.status === "tunnel" || data.status === "local-processing") {
+                  var filename = data.filename || "download";
+                  showResult(
+                    "ok",
+                    'ready: <a href="' + data.url + '" target="_blank" rel="noopener">' + escapeHtml(filename) + "</a>"
+                  );
+                  return;
+                }
+          
+                if (data.status === "picker" && Array.isArray(data.picker)) {
+                  var html = "choose an item:<br><br>";
+                  data.picker.forEach(function (item, i) {
+                    html += '<div class="picker-item"><span>' + (i + 1) + ". " +
+                      escapeHtml(item.type || "item") + '</span><a href="' + item.url +
+                      '" target="_blank" rel="noopener">open</a></div>';
+                  });
+                  if (data.audio) {
+                    html += '<div class="picker-item"><span>audio</span><a href="' + data.audio +
+                      '" target="_blank" rel="noopener">open</a></div>';
+                  }
+                  showResult("ok", html);
+                  return;
+                }
+          
+                showResult("error", "unrecognized response from API: " + escapeHtml(JSON.stringify(data)));
+              } catch (networkErr) {
+                showResult(
+                  "error",
+                  "couldn't reach the API at all (network/CORS failure). " +
+                  "if the tunnel rotated to a new URL, open settings and update the API endpoint. " +
+                  "details: " + escapeHtml(networkErr.message || String(networkErr))
+                );
+              } finally {
+                goBtn.disabled = false;
+              }
+            }
+          
+            goBtn.addEventListener("click", handleDownload);
+            linkInput.addEventListener("keydown", function (e) {
+              if (e.key === "Enter") handleDownload();
+            });
+          })();
+          </script>
+          </body>
+          </html>
+          HTML_EOF
+
+          # Bake in the current API tunnel URL as the default (still overridable at
+          # runtime from the settings panel with zero rebuild needed).
+          sed -i "s#__API_URL_PLACEHOLDER__#${{ steps.api_tunnel.outputs.API_URL }}#g" web/index.html
+
+      - name: Start Web Panel (plain python http.server - no build step needed)
         run: |
           cd web
-          corepack enable
-          pnpm install --frozen-lockfile
-          # WEB_HOST must be a bare host, not a URL with a scheme (cobalt uses it for
-          # meta tags, not for building request URLs)
-          WEB_DEFAULT_API="${{ steps.api_tunnel.outputs.API_URL }}/" \
-          WEB_HOST="localhost:3000" \
-          pnpm run build
-
-      - name: Show what the build actually produced (debug)
-        run: |
-          cd web
-          echo "--- svelte.config.js (which adapter is configured) ---"
-          cat svelte.config.js || true
-          echo "--- top-level build output candidates ---"
-          for d in .svelte-kit/cloudflare build .svelte-kit/output/client dist; do
-            if [ -d "$d" ]; then
-              echo ">>> $d exists:"
-              find "$d" -maxdepth 2 | head -n 40
-            fi
-          done
-
-      - name: Start Cobalt Web UI
-        run: |
-          cd web
-          # Auto-detect what kind of output the build produced instead of assuming:
-          # - if _worker.js exists, it's an @sveltejs/adapter-cloudflare build and must be
-          #   run through wrangler (a plain static server can't execute the worker, which is
-          #   why every request was 404ing)
-          # - otherwise, treat it as plain static output (adapter-static) and serve it directly
-          OUT_DIR=""
-          for d in .svelte-kit/cloudflare build .svelte-kit/output/client dist; do
-            if [ -d "$d" ]; then OUT_DIR="$d"; break; fi
-          done
-
-          if [ -z "$OUT_DIR" ]; then
-            echo "::error::No build output directory found at all (checked .svelte-kit/cloudflare, build, .svelte-kit/output/client, dist)."
-            echo "The build step must have failed or outputs somewhere else - check the 'Build Cobalt Web UI from Fork' step logs and the debug step above."
-            exit 1
-          fi
-
-          echo "Using output directory: $OUT_DIR"
-
-          if [ -f "$OUT_DIR/_worker.js" ]; then
-            echo "_worker.js found -> serving with wrangler pages dev"
-            pnpm dlx wrangler@4 pages dev "$OUT_DIR" --port 3000 --ip 0.0.0.0 &
-          else
-            echo "No _worker.js -> serving as plain static output"
-            npx serve -s "$OUT_DIR" -l 3000 &
-          fi
+          python3 -m http.server 3000 --bind 0.0.0.0 &
 
           for i in $(seq 1 30); do
-            # `|| true` is required here: this step runs under `bash -e`, and without it
-            # curl's connection-refused exit code (7) - which happens on every attempt
-            # before the server finishes starting - kills the whole script instantly
-            # instead of letting this retry loop work as intended.
             code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/ || true)
             if [ "$code" = "200" ]; then
-              echo "Web UI is up (200 OK)"; exit 0
+              echo "Web panel is up (200 OK)"; exit 0
             fi
             echo "Got HTTP $code, retrying..."
             sleep 2
           done
-          echo "::error::Web UI never returned 200 on / - dumping directory listing for debugging:"
-          find "$OUT_DIR" -maxdepth 2
+          echo "::error::Web panel never returned 200 on /"
           exit 1
 
       - name: Start Web Tunnel
@@ -161,8 +449,6 @@ jobs:
 
       - name: Verify CORS preflight works like a real browser would see it
         run: |
-          # Simulate the OPTIONS preflight a browser sends before the real POST /,
-          # using the public web tunnel origin exactly as the browser would.
           echo "--- preflight response headers ---"
           curl -sS -i -X OPTIONS "${{ steps.api_tunnel.outputs.API_URL }}/" \
             -H "Origin: ${{ steps.web_tunnel.outputs.WEB_URL }}" \
@@ -177,9 +463,6 @@ jobs:
           API_URL="${{ steps.api_tunnel.outputs.API_URL }}"
           WEB_URL="${{ steps.web_tunnel.outputs.WEB_URL }}"
 
-          # Fail loudly instead of silently finishing with a missing link -
-          # previously a missing value here just meant an empty/missing line
-          # with no indication anything had gone wrong.
           if [ -z "$API_URL" ]; then
             echo "::error::API_URL is empty - the API tunnel step did not actually produce a link."
             exit 1
@@ -189,16 +472,13 @@ jobs:
             exit 1
           fi
 
-          # Print directly to the console log (not just the Job Summary tab) so the
-          # links are visible wherever you're looking, with no chance of being missed.
           echo "=========================================="
           echo " API  PANEL: $API_URL"
           echo " WEB  PANEL: $WEB_URL"
           echo "=========================================="
 
-          # Also write to the Job Summary tab (nice markdown view, persists after the run)
           {
-            echo "### 🔗 Cobalt tunnel links"
+            echo "### Cobalt tunnel links"
             echo ""
             echo "| Service | URL |"
             echo "|---|---|"
@@ -216,8 +496,8 @@ jobs:
             CURRENT_WEB=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/web_cf.log | tail -n 1)
             if [ "$CURRENT_API" != "$ORIGINAL_API" ]; then
               echo "::warning::API quick tunnel reconnected with a NEW url ($CURRENT_API)."
-              echo "The web app was built pointing at $ORIGINAL_API, which is now dead."
-              echo "This is the quick-tunnel instability issue - consider a named Cloudflare Tunnel instead."
+              echo "Open the web panel's settings and paste this new URL in as the API endpoint -"
+              echo "no rebuild needed since it's a plain static page now."
             fi
             if [ "$CURRENT_WEB" != "$ORIGINAL_WEB" ]; then
               echo "::warning::Web quick tunnel reconnected with a NEW url ($CURRENT_WEB)."
