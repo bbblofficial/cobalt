@@ -29,7 +29,17 @@ jobs:
             -e API_LISTEN_ADDRESS="0.0.0.0" \
             -e API_REDIS_URL="redis://localhost:6379" \
             -e CORS_WILDCARD="1" \
-            ghcr.io/imputnet/cobalt:10
+            ghcr.io/imputnet/cobalt:11
+
+      - name: Wait for Cobalt API to come up
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9000/ > /dev/null; then
+              echo "API is up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "Cobalt API never became ready"; docker logs cobalt-api; exit 1
 
       - name: Start API Tunnel
         id: api_tunnel
@@ -42,7 +52,7 @@ jobs:
           cat /tmp/api_cf.log
           API_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/api_cf.log | head -n 1)
           if [ -z "$API_URL" ]; then echo "API Tunnel failed"; exit 1; fi
-          echo "API_URL=$API_URL" >> $GITHUB_OUTPUT
+          echo "API_URL=$API_URL" >> "$GITHUB_OUTPUT"
 
       - name: Restart Cobalt API with correct API_URL
         run: |
@@ -53,23 +63,45 @@ jobs:
             -e API_LISTEN_ADDRESS="0.0.0.0" \
             -e API_REDIS_URL="redis://localhost:6379" \
             -e CORS_WILDCARD="1" \
-            ghcr.io/imputnet/cobalt:10
+            ghcr.io/imputnet/cobalt:11
+
+          # make sure it's actually back up before anything tries to use it
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9000/ > /dev/null; then
+              echo "API is back up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "Cobalt API never came back up after restart"; docker logs cobalt-api; exit 1
 
       - name: Build Cobalt Web UI from Fork
         run: |
           cd web
           corepack enable
           pnpm install --frozen-lockfile
+          # WEB_HOST must be a bare host, not a URL with a scheme (cobalt uses it for
+          # meta tags, not for building request URLs)
           WEB_DEFAULT_API="${{ steps.api_tunnel.outputs.API_URL }}/" \
-          WEB_HOST="http://localhost:3000" \
+          WEB_HOST="localhost:3000" \
           pnpm run build
-          cd ..
 
       - name: Start Cobalt Web UI
         run: |
           cd web
-          npx serve -s build -l 3000 &
-          cd ..
+          # IMPORTANT: cobalt's web app uses @sveltejs/adapter-cloudflare (see web/wrangler.jsonc),
+          # so `pnpm run build` does NOT produce a plain static "build" folder you can hand to
+          # `serve`. It produces a Cloudflare Worker bundle at .svelte-kit/cloudflare
+          # (_worker.js + static assets). That mismatch was why the web UI never came up.
+          # Serve it with wrangler's local dev server instead, which actually runs the worker.
+          pnpm dlx wrangler@4 pages dev .svelte-kit/cloudflare --port 3000 --ip 0.0.0.0 &
+
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/ > /dev/null; then
+              echo "Web UI is up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "Web UI never became ready"; exit 1
 
       - name: Start Web Tunnel
         id: web_tunnel
@@ -82,12 +114,12 @@ jobs:
           cat /tmp/web_cf.log
           WEB_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/web_cf.log | head -n 1)
           if [ -z "$WEB_URL" ]; then echo "Web Tunnel failed"; exit 1; fi
-          echo "WEB_URL=$WEB_URL" >> $GITHUB_OUTPUT
+          echo "WEB_URL=$WEB_URL" >> "$GITHUB_OUTPUT"
 
       - name: Print Final Links
         run: |
-          echo "API TUNNEL LINK: ${{ steps.api_tunnel.outputs.API_URL }}" >> $GITHUB_STEP_SUMMARY
-          echo "WEB TUNNEL LINK: ${{ steps.web_tunnel.outputs.WEB_URL }}" >> $GITHUB_STEP_SUMMARY
+          echo "API TUNNEL LINK: ${{ steps.api_tunnel.outputs.API_URL }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "WEB TUNNEL LINK: ${{ steps.web_tunnel.outputs.WEB_URL }}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Keep Alive for 6 Hours
         run: sleep 21600
