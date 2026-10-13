@@ -131,7 +131,11 @@ jobs:
           fi
 
           for i in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/)
+            # `|| true` is required here: this step runs under `bash -e`, and without it
+            # curl's connection-refused exit code (7) - which happens on every attempt
+            # before the server finishes starting - kills the whole script instantly
+            # instead of letting this retry loop work as intended.
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/ || true)
             if [ "$code" = "200" ]; then
               echo "Web UI is up (200 OK)"; exit 0
             fi
