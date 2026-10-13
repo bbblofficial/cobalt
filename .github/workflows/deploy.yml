@@ -174,8 +174,37 @@ jobs:
 
       - name: Print Final Links
         run: |
-          echo "API TUNNEL LINK: ${{ steps.api_tunnel.outputs.API_URL }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "WEB TUNNEL LINK: ${{ steps.web_tunnel.outputs.WEB_URL }}" >> "$GITHUB_STEP_SUMMARY"
+          API_URL="${{ steps.api_tunnel.outputs.API_URL }}"
+          WEB_URL="${{ steps.web_tunnel.outputs.WEB_URL }}"
+
+          # Fail loudly instead of silently finishing with a missing link -
+          # previously a missing value here just meant an empty/missing line
+          # with no indication anything had gone wrong.
+          if [ -z "$API_URL" ]; then
+            echo "::error::API_URL is empty - the API tunnel step did not actually produce a link."
+            exit 1
+          fi
+          if [ -z "$WEB_URL" ]; then
+            echo "::error::WEB_URL is empty - the Web tunnel step did not actually produce a link."
+            exit 1
+          fi
+
+          # Print directly to the console log (not just the Job Summary tab) so the
+          # links are visible wherever you're looking, with no chance of being missed.
+          echo "=========================================="
+          echo " API  PANEL: $API_URL"
+          echo " WEB  PANEL: $WEB_URL"
+          echo "=========================================="
+
+          # Also write to the Job Summary tab (nice markdown view, persists after the run)
+          {
+            echo "### 🔗 Cobalt tunnel links"
+            echo ""
+            echo "| Service | URL |"
+            echo "|---|---|"
+            echo "| API | $API_URL |"
+            echo "| Web | $WEB_URL |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Keep Alive for 6 Hours (watch for tunnel drops)
         run: |
