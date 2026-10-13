@@ -55,18 +55,26 @@ jobs:
             -e CORS_WILDCARD="1" \
             ghcr.io/imputnet/cobalt:10
 
+      - name: Build Cobalt Web UI from Fork
+        run: |
+          cd web
+          corepack enable
+          pnpm install --frozen-lockfile
+          WEB_DEFAULT_API="${{ steps.api_tunnel.outputs.API_URL }}/" \
+          WEB_HOST="http://localhost:3000" \
+          pnpm run build
+          cd ..
+
       - name: Start Cobalt Web UI
         run: |
-          docker run -d --name cobalt-web --network host \
-            -e WEB_DEFAULT_API="${{ steps.api_tunnel.outputs.API_URL }}/" \
-            -e WEB_HOST="http://localhost:8787" \
-            -e PORT="8787" \
-            ghcr.io/spotdemo4/cobalt-web:latest
+          cd web
+          npx serve -s build -l 3000 &
+          cd ..
 
       - name: Start Web Tunnel
         id: web_tunnel
         run: |
-          ./cloudflared tunnel --url http://localhost:8787 > /tmp/web_cf.log 2>&1 &
+          ./cloudflared tunnel --url http://localhost:3000 > /tmp/web_cf.log 2>&1 &
           for i in $(seq 1 60); do
             if grep -qE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/web_cf.log; then break; fi
             sleep 2
