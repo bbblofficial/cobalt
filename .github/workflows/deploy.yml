@@ -1,4 +1,4 @@
-name: Run Cobalt with TryCloudflare
+name: Run Cobalt API + Web with TryCloudflare
 
 on:
   workflow_dispatch:
@@ -19,49 +19,67 @@ jobs:
 
       - name: Start Redis
         run: |
-          docker run -d --name cobalt-redis \
-            --network host \
-            redis:7-alpine
+          docker run -d --name cobalt-redis --network host redis:7-alpine
 
-      - name: Start Cloudflare Quick Tunnel
-        id: tunnel
+      - name: Start Cobalt API (temporary)
         run: |
-          # Start tunnel in background
-          ./cloudflared tunnel --url http://localhost:9000 > /tmp/cf.log 2>&1 &
-
-          # Wait for the REAL URL (not the "Requesting new quick Tunnel on trycloudflare.com" line)
-          for i in $(seq 1 60); do
-            if grep -qE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/cf.log; then
-              break
-            fi
-            sleep 2
-          done
-
-          echo "--- Cloudflare Log ---"
-          cat /tmp/cf.log
-          echo "----------------------"
-
-          URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/cf.log | head -n 1)
-
-          if [ -z "$URL" ]; then
-            echo "Error: Failed to generate Tunnel URL."
-            exit 1
-          fi
-
-          echo "Tunnel URL: $URL"
-          echo "url=$URL" >> $GITHUB_OUTPUT
-          echo "### Cobalt API URL: $URL" >> $GITHUB_STEP_SUMMARY
-
-      - name: Start Cobalt API
-        run: |
-          docker run -d --name cobalt-api \
-            --network host \
-            -e API_URL="${{ steps.tunnel.outputs.url }}/" \
+          docker run -d --name cobalt-api --network host \
+            -e API_URL="http://localhost:9000/" \
             -e API_PORT="9000" \
             -e API_LISTEN_ADDRESS="0.0.0.0" \
             -e API_REDIS_URL="redis://localhost:6379" \
             -e CORS_WILDCARD="1" \
             ghcr.io/imputnet/cobalt:10
+
+      - name: Start API Tunnel
+        id: api_tunnel
+        run: |
+          ./cloudflared tunnel --url http://localhost:9000 > /tmp/api_cf.log 2>&1 &
+          for i in $(seq 1 60); do
+            if grep -qE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/api_cf.log; then break; fi
+            sleep 2
+          done
+          cat /tmp/api_cf.log
+          API_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/api_cf.log | head -n 1)
+          if [ -z "$API_URL" ]; then echo "API Tunnel failed"; exit 1; fi
+          echo "API_URL=$API_URL" >> $GITHUB_OUTPUT
+
+      - name: Restart Cobalt API with correct API_URL
+        run: |
+          docker stop cobalt-api && docker rm cobalt-api
+          docker run -d --name cobalt-api --network host \
+            -e API_URL="${{ steps.api_tunnel.outputs.API_URL }}/" \
+            -e API_PORT="9000" \
+            -e API_LISTEN_ADDRESS="0.0.0.0" \
+            -e API_REDIS_URL="redis://localhost:6379" \
+            -e CORS_WILDCARD="1" \
+            ghcr.io/imputnet/cobalt:10
+
+      - name: Start Cobalt Web UI
+        run: |
+          docker run -d --name cobalt-web --network host \
+            -e WEB_DEFAULT_API="${{ steps.api_tunnel.outputs.API_URL }}/" \
+            -e WEB_HOST="http://localhost:8787" \
+            -e PORT="8787" \
+            ghcr.io/spotdemo4/cobalt-web:latest
+
+      - name: Start Web Tunnel
+        id: web_tunnel
+        run: |
+          ./cloudflared tunnel --url http://localhost:8787 > /tmp/web_cf.log 2>&1 &
+          for i in $(seq 1 60); do
+            if grep -qE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/web_cf.log; then break; fi
+            sleep 2
+          done
+          cat /tmp/web_cf.log
+          WEB_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/web_cf.log | head -n 1)
+          if [ -z "$WEB_URL" ]; then echo "Web Tunnel failed"; exit 1; fi
+          echo "WEB_URL=$WEB_URL" >> $GITHUB_OUTPUT
+
+      - name: Print Final Links
+        run: |
+          echo "API TUNNEL LINK: ${{ steps.api_tunnel.outputs.API_URL }}" >> $GITHUB_STEP_SUMMARY
+          echo "WEB TUNNEL LINK: ${{ steps.web_tunnel.outputs.WEB_URL }}" >> $GITHUB_STEP_SUMMARY
 
       - name: Keep Alive for 6 Hours
         run: sleep 21600
