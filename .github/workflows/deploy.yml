@@ -88,23 +88,59 @@ jobs:
           WEB_HOST="localhost:3000" \
           pnpm run build
 
+      - name: Show what the build actually produced (debug)
+        run: |
+          cd web
+          echo "--- svelte.config.js (which adapter is configured) ---"
+          cat svelte.config.js || true
+          echo "--- top-level build output candidates ---"
+          for d in .svelte-kit/cloudflare build .svelte-kit/output/client dist; do
+            if [ -d "$d" ]; then
+              echo ">>> $d exists:"
+              find "$d" -maxdepth 2 | head -n 40
+            fi
+          done
+
       - name: Start Cobalt Web UI
         run: |
           cd web
-          # IMPORTANT: cobalt's web app uses @sveltejs/adapter-cloudflare (see web/wrangler.jsonc),
-          # so `pnpm run build` does NOT produce a plain static "build" folder you can hand to
-          # `serve`. It produces a Cloudflare Worker bundle at .svelte-kit/cloudflare
-          # (_worker.js + static assets). That mismatch was why the web UI never came up.
-          # Serve it with wrangler's local dev server instead, which actually runs the worker.
-          pnpm dlx wrangler@4 pages dev .svelte-kit/cloudflare --port 3000 --ip 0.0.0.0 &
+          # Auto-detect what kind of output the build produced instead of assuming:
+          # - if _worker.js exists, it's an @sveltejs/adapter-cloudflare build and must be
+          #   run through wrangler (a plain static server can't execute the worker, which is
+          #   why every request was 404ing)
+          # - otherwise, treat it as plain static output (adapter-static) and serve it directly
+          OUT_DIR=""
+          for d in .svelte-kit/cloudflare build .svelte-kit/output/client dist; do
+            if [ -d "$d" ]; then OUT_DIR="$d"; break; fi
+          done
+
+          if [ -z "$OUT_DIR" ]; then
+            echo "::error::No build output directory found at all (checked .svelte-kit/cloudflare, build, .svelte-kit/output/client, dist)."
+            echo "The build step must have failed or outputs somewhere else - check the 'Build Cobalt Web UI from Fork' step logs and the debug step above."
+            exit 1
+          fi
+
+          echo "Using output directory: $OUT_DIR"
+
+          if [ -f "$OUT_DIR/_worker.js" ]; then
+            echo "_worker.js found -> serving with wrangler pages dev"
+            pnpm dlx wrangler@4 pages dev "$OUT_DIR" --port 3000 --ip 0.0.0.0 &
+          else
+            echo "No _worker.js -> serving as plain static output"
+            npx serve -s "$OUT_DIR" -l 3000 &
+          fi
 
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:3000/ > /dev/null; then
-              echo "Web UI is up"; exit 0
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/)
+            if [ "$code" = "200" ]; then
+              echo "Web UI is up (200 OK)"; exit 0
             fi
+            echo "Got HTTP $code, retrying..."
             sleep 2
           done
-          echo "Web UI never became ready"; exit 1
+          echo "::error::Web UI never returned 200 on / - dumping directory listing for debugging:"
+          find "$OUT_DIR" -maxdepth 2
+          exit 1
 
       - name: Start Web Tunnel
         id: web_tunnel
